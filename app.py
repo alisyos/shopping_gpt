@@ -1,6 +1,17 @@
 from flask import Flask, send_from_directory, request, jsonify
+import pandas as pd
+import re
 
 app = Flask(__name__)
+
+# CSV 파일 로드
+def load_products():
+    try:
+        df = pd.read_csv('tailor_product_20250121.csv')
+        return df
+    except Exception as e:
+        print(f"Error loading CSV: {e}")
+        return pd.DataFrame()
 
 @app.route('/')
 def home():
@@ -14,23 +25,37 @@ def serve_static(path):
 def search():
     try:
         data = request.json
-        query = data.get('query', '')
+        query = data.get('query', '').strip()
         
-        # 테스트용 응답
+        if not query:
+            return jsonify({'results': [], 'total_count': 0})
+        
+        # CSV 파일에서 데이터 로드
+        df = load_products()
+        
+        # 검색어로 필터링 (상품명에서 검색)
+        mask = df['product_name'].str.contains(query, case=False, na=False)
+        filtered_df = df[mask].head(10)  # 상위 10개 결과만
+        
+        # 결과 포맷팅
+        results = []
+        for _, row in filtered_df.iterrows():
+            results.append({
+                'product_name': row['product_name'],
+                'mall_name': row['mall_name'],
+                'current_price': f"{row['current_price']:,}원",
+                'original_price': f"{row['original_price']:,}원" if pd.notna(row['original_price']) else None,
+                'thumbnail_img_url': row['thumbnail_img_url'],
+                'product_url_path': row['product_url_path']
+            })
+        
         return jsonify({
-            'results': [
-                {
-                    'product_name': '테스트 상품',
-                    'mall_name': '테스트몰',
-                    'current_price': '10,000원',
-                    'original_price': '12,000원',
-                    'thumbnail_img_url': '/static/no-image.png',
-                    'product_url_path': '#'
-                }
-            ],
-            'total_count': 1
+            'results': results,
+            'total_count': len(results)
         })
+        
     except Exception as e:
+        print(f"Search error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/test')
