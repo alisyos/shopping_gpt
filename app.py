@@ -1,4 +1,6 @@
 from flask import Flask, send_from_directory, request, jsonify
+from openai import OpenAI
+import os
 import requests
 import csv
 from io import StringIO
@@ -6,8 +8,10 @@ import json
 import re
 import math
 import ast
+import traceback
 
 app = Flask(__name__)
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 # 전역 변수로 style_mapping 정의
 style_mapping = {
@@ -93,36 +97,83 @@ def search():
         if not query:
             return jsonify({'results': [], 'total_count': 0})
         
+        # 필터 값 분석
+        filter_values = analyze_query(query)
+        print(f"분석된 필터 값: {filter_values}")
+        
         # CSV 파일에서 데이터 로드
         products = load_products()
+        filtered_products = products.copy()
         
-        # 검색어로 필터링 (상품명에서 검색)
-        filtered_products = []
-        for product in products:
-            if query.lower() in product['product_name'].lower():
-                try:
-                    filtered_products.append({
-                        'product_name': product['product_name'],
-                        'mall_name': product['mall_name'],
-                        'current_price': f"{int(float(product['current_price'].replace(',', '').replace('원', ''))):,}원",
-                        'original_price': f"{int(float(product['original_price'].replace(',', '').replace('원', ''))):,}원" if product['original_price'] else None,
-                        'thumbnail_img_url': product['thumbnail_img_url'],
-                        'product_url_path': product['product_url_path']
-                    })
-                except Exception as e:
-                    print(f"상품 처리 중 오류: {str(e)}")
-                    continue
-                
-                if len(filtered_products) >= 10:  # 최대 10개 결과
-                    break
+        # 키워드 필터링
+        if filter_values and filter_values.get('keywords'):
+            filtered_products = [
+                product for product in filtered_products
+                if any(keyword.lower() in product['product_name'].lower() 
+                      for keyword in filter_values['keywords'])
+            ]
+        
+        # 가격 필터링
+        if filter_values and filter_values.get('price_limit'):
+            price_limit = filter_values['price_limit']
+            filtered_products = [
+                product for product in filtered_products
+                if float(product['current_price'].replace(',', '').replace('원', '')) <= price_limit
+            ]
+        
+        # 스타일 필터링
+        if filter_values and filter_values.get('style'):
+            filtered_products = [
+                product for product in filtered_products
+                if 'style' in product and any(
+                    filter_values['style'].lower() in style.lower()
+                    for style in ast.literal_eval(product['style'])
+                )
+            ]
+        
+        # 색상 필터링
+        if filter_values and filter_values.get('color'):
+            filtered_products = [
+                product for product in filtered_products
+                if 'color_option' in product and 
+                filter_values['color'].lower() in product['color_option'].lower()
+            ]
+        
+        # 시즌 필터링
+        if filter_values and filter_values.get('season'):
+            seasons = filter_values['season'] if isinstance(filter_values['season'], list) else [filter_values['season']]
+            filtered_products = [
+                product for product in filtered_products
+                if 'season' in product and any(
+                    season in ast.literal_eval(product['season'])
+                    for season in seasons
+                )
+            ]
+        
+        # 결과 포맷팅
+        formatted_results = []
+        for product in filtered_products[:10]:  # 최대 10개 결과
+            try:
+                formatted_results.append({
+                    'product_name': product['product_name'],
+                    'mall_name': product['mall_name'],
+                    'current_price': f"{int(float(product['current_price'].replace(',', '').replace('원', ''))):,}원",
+                    'original_price': f"{int(float(product['original_price'].replace(',', '').replace('원', ''))):,}원" if product['original_price'] else None,
+                    'thumbnail_img_url': product['thumbnail_img_url'],
+                    'product_url_path': product['product_url_path']
+                })
+            except Exception as e:
+                print(f"상품 처리 중 오류: {str(e)}")
+                continue
         
         return jsonify({
-            'results': filtered_products,
-            'total_count': len(filtered_products)
+            'results': formatted_results,
+            'total_count': len(formatted_results)
         })
         
     except Exception as e:
-        print(f"Search error: {e}")
+        print(f"Search error: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/recommend', methods=['POST'])
@@ -138,30 +189,130 @@ def recommend():
                 'message': '추천할 상품이 없습니다.'
             })
         
-        # 간단한 추천 로직 (첫 3개 상품 반환)
-        recommendations = []
-        for product in products[:3]:
-            recommendations.append({
-                'product_name': product['product_name'],
-                'reason': f"{product['product_name']}은(는) 검색하신 '{query}'와(과) 잘 어울리는 상품입니다.",
-                'styling_tip': "다른 기본 아이템들과 매치하여 스타일리시하게 연출해보세요.",
-                'thumbnail_img_url': product['thumbnail_img_url'],
-                'product_url_path': product['product_url_path'],
-                'price': product['current_price'],
-                'mall_name': product['mall_name']
+        # AI 추천 결과 생성
+        recommendations = get_ai_recommendations(query, products)
+        
+        if recommendations:
+            return jsonify(recommendations)
+        else:
+            return jsonify({
+                'recommendations': [],
+                'message': '추천 생성 중 오류가 발생했습니다.'
             })
         
-        return jsonify({
-            'recommendations': recommendations
-        })
-        
     except Exception as e:
-        print(f"Recommend error: {e}")
+        print(f"Recommend error: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/test')
 def test():
     return {"message": "Hello from Flask!"}
+
+def analyze_query(query):
+    try:
+        prompt = f"""
+사용자의 쇼핑 관련 질문을 분석하여 다음 필터 값들을 JSON 형식으로 추출해주세요.
+
+분석 규칙:
+1. 실제 검색하고자 하는 상품 키워드만 'keywords'에 포함
+2. 색상은 별도로 추출하여 'color' 필드에 포함
+   - 예시: "검정색 바지" → color: "블랙"
+   - 색상 매핑: 검정/검은색 → 블랙, 하얀/흰색 → 화이트, 빨간색 → 레드 등
+3. 가격 제한은 다음 규칙을 따라 추출:
+   - "5만원 이하" → 50000
+   - 항상 원 단위로 변환하여 숫자만 반환
+
+입력: {query}
+
+JSON 형식으로만 응답해주세요:
+{{
+    "style": "다음 중 하나만 선택 [스포츠, 캐주얼, 데일리, 페미닌, 포멀, 섹시, 미니멀, 스포티, 럭셔리, 스트릿, 트렌디, 클래식, 빈티지, 보헤미안, 글래머러스, 프레피, 아웃도어, 유니크, 컨템포러리]",
+    "gender": "명시적인 성별 언급이 있는 경우에만 [여성, 남성, 공용] 중 선택, 없으면 null",
+    "age_group": "다음 중 하나만 선택 [10대, 20대, 30대, 40대, 50대 이상], 없으면 null",
+    "price_limit": "가격 제한이 있는 경우 원 단위 숫자로 변환, 없으면 null",
+    "season": "다음 중 선택 [봄, 여름, 가을, 겨울, 간절기] (여러 개 가능), 없으면 null",
+    "keywords": "실제 검색하고자 하는 상품 키워드만 포함 (배열)",
+    "color": "색상 언급이 있는 경우 매핑된 색상명, 없으면 null"
+}}"""
+
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a helpful shopping assistant that analyzes user queries and extracts structured filter values. Always respond with valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+
+        content = response.choices[0].message.content.strip()
+        if '```json' in content:
+            content = content.split('```json')[1].split('```')[0].strip()
+        elif '```' in content:
+            content = content.split('```')[1].strip()
+
+        return json.loads(content)
+
+    except Exception as e:
+        print(f"Query analysis error: {str(e)}")
+        return None
+
+def get_ai_recommendations(query, products, top_n=3):
+    try:
+        if not products:
+            return {
+                "recommendations": [],
+                "message": "검색 결과가 없어 추천을 생성할 수 없습니다."
+            }
+
+        prompt = f"""
+사용자 질문: {query}
+
+다음은 검색된 상품 목록입니다:
+{json.dumps(products[:10], ensure_ascii=False, indent=2)}
+
+위 상품들 중에서 사용자의 요구사항에 가장 적합한 상품 3개를 선택하고, 아래 가이드라인에 따라 상세한 추천 이유와 스타일링 제안을 해주세요:
+
+1. 사용자의 요구사항 분석
+2. 상품 추천 시 포함할 내용
+3. 스타일링 제안
+
+반드시 아래 형식의 유효한 JSON으로 응답해주세요:
+
+{{
+    "recommendations": [
+        {{
+            "product_name": "상품명",
+            "reason": "상세한 추천 이유",
+            "styling_tip": "스타일링 제안",
+            "thumbnail_img_url": "이미지URL",
+            "product_url_path": "상품URL",
+            "price": "가격",
+            "mall_name": "쇼핑몰명"
+        }}
+    ]
+}}"""
+
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a helpful shopping assistant that provides personalized product recommendations. Always respond with valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+
+        content = response.choices[0].message.content.strip()
+        if '```json' in content:
+            content = content.split('```json')[1].split('```')[0].strip()
+        elif '```' in content:
+            content = content.split('```')[1].strip()
+
+        return json.loads(content)
+
+    except Exception as e:
+        print(f"AI recommendation error: {str(e)}")
+        return None
 
 # Vercel requires this
 app.debug = True
