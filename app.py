@@ -5,6 +5,13 @@ from io import StringIO
 
 app = Flask(__name__)
 
+def clean_price(price_str):
+    try:
+        # '원' 제거하고 쉼표 제거
+        return int(price_str.replace('원', '').replace(',', ''))
+    except:
+        return 0
+
 def load_products():
     try:
         csv_url = "https://raw.githubusercontent.com/alisyos/shopping_gpt/main/tailor_product_20250121.csv"
@@ -40,11 +47,14 @@ def search():
         results = []
         for product in products:
             if query in product['product_name'].lower():
+                current_price = clean_price(product['current_price'])
+                original_price = clean_price(product['original_price']) if product['original_price'] else None
+                
                 results.append({
                     'product_name': product['product_name'],
                     'mall_name': product['mall_name'],
-                    'current_price': f"{int(float(product['current_price'])):,}원",
-                    'original_price': f"{int(float(product['original_price'])):,}원" if product['original_price'] else None,
+                    'current_price': f"{current_price:,}원",
+                    'original_price': f"{original_price:,}원" if original_price else None,
                     'thumbnail_img_url': product['thumbnail_img_url'],
                     'product_url_path': product['product_url_path']
                 })
