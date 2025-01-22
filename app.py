@@ -136,13 +136,36 @@ def load_csv():
 # 앱 시작 시 바로 CSV 파일 로드
 load_csv()
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def home():
     return send_from_directory('static', 'index.html')
 
-@app.route('/static/<path:path>')
+@app.route('/static/<path:path>', methods=['GET'])
 def serve_static(path):
     return send_from_directory('static', path)
+
+@app.route('/search', methods=['POST'])
+def search():
+    try:
+        data = request.json
+        query = data.get('query', '')
+        
+        # 임시 테스트 응답
+        return jsonify({
+            'results': [
+                {
+                    'product_name': '테스트 상품',
+                    'mall_name': '테스트몰',
+                    'current_price': '10,000원',
+                    'original_price': '12,000원',
+                    'thumbnail_img_url': '/static/no-image.png',
+                    'product_url_path': '#'
+                }
+            ],
+            'total_count': 1
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 def analyze_query(query):
     try:
@@ -393,22 +416,6 @@ def apply_season_filter(df, seasons):
             return False
     
     return df[df['season'].apply(check_seasons)]
-
-@app.route('/api/search', methods=['POST'])
-def search():
-    data = request.json
-    query = data.get('query', '')
-    
-    headers = {
-        'Authorization': f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-        'Content-Type': 'application/json'
-    }
-    
-    # 임시 응답
-    return jsonify({
-        'results': [],
-        'total_count': 0
-    })
 
 def get_ai_recommendations(query, products, top_n=3):
     try:
